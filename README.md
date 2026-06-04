@@ -1,7 +1,6 @@
 # Learning Hub
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Topic: Web Development](https://img.shields.io/badge/Topic-Web_Development-brightgreen)
 ![Status: Active](https://img.shields.io/badge/Status-Active-success)
 ![Language: Documentation](https://img.shields.io/badge/Language-Markdown-informational)
 
