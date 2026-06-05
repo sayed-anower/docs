@@ -55,7 +55,7 @@ async fn main() -> MainRlt {
     let email_service = EmailService::new(email_config)
         .map_err(|_| actix_web::error::ErrorInternalServerError("Failed to initialize Email Service"))?;
     
-    let pool = DbPool::new(env_var("DATABASE_URL"));
+    let pool = DbPool::new(&env_var("DATABASE_URL"), 3); // max_connection = 3
     let redis = RedisManager::new(&env_var("REDIS_URL"))
         .map_err(|_| actix_web::error::ErrorInternalServerError("Failed to connect to Redis"))?;
     
@@ -363,24 +363,13 @@ async fn test_crypto(crypto: web::Data<CryptoService>) -> Result<Rsp, actix_web:
 }
 
 ```
-## 9. General Standalone Utilities
-Quick-acting helper utilities for initialization phases or automated script contexts:
-```rust
-// Thread-blocking user IO capture for configuration terminals
-let user_input = input("Enter administrative initialization code: ");
 
-// Generate secure salt vectors or cryptographically random tokens
-let secure_hex_key = generate_key(64); 
-println!("Entropy block string key: {}", secure_hex_key);
-
-```
-
-## 10. Error Handling
+## 9. Error Handling
 
 Streamline error handling in your HTTP routes using the built-in `http_error!` macro. This intercepts failures and automatically formats the error response for the client.
 
 ```rust
-use actix_web::{get, HttpResponse};
+use actix_web::{get};
 use fr_rust::prelude::*;
 
 #[get("/hello")]
