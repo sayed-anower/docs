@@ -242,7 +242,6 @@ async fn test_db(pool: web::Data<DbPool>) -> Result<Rsp, actix_web::Error> {
     
     Ok(http_ok(&client_msg))
 }
-
 ```
 ## 6. Coordinated Redis Cache
 Managed cleanly over deadpool_redis and redis-rs capabilities.
@@ -375,6 +374,33 @@ let secure_hex_key = generate_key(64);
 println!("Entropy block string key: {}", secure_hex_key);
 
 ```
+
+## 10. Error Handling
+
+Streamline error handling in your HTTP routes using the built-in `http_error!` macro. This intercepts failures and automatically formats the error response for the client.
+
+```rust
+use actix_web::{get, HttpResponse};
+use fr_rust::prelude::*;
+
+#[get("/hello")]
+async fn do_something() -> Rsp {
+    // Evaluates the future; if it fails, immediately returns the custom error message to the client
+    let data = http_error!(
+        my_async_function().await,
+        "Failed to process request data"
+    );
+    // If Everything is fine:
+    send_str("Hello, World!")
+}
+```
+
+## Examples
+
+Here are some projects demonstrating how to use this library:
+
+* 👤 [Account Handling Routes](https://github.com/sayed-anower/fr-acc) – An advanced user account management demo featuring signup, login, and authentication flows.
+* 💬 [Chat Server Handling](https://github.com/sayed-anower/chatapo) – A full-scale, production-grade chat server featuring multi-server support powered by Redis.
 
 ## Production Security Review Checklist
 > [!IMPORTANT]
