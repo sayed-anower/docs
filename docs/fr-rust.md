@@ -46,24 +46,27 @@ async fn main() -> MainRlt {
     
     let email_config = EmailConfig {
         smtp_host: env_var("SMTP_HOST"),
-        smtp_port: env_var("SMTP_PORT").parse().map_err(|_| actix_web::error::ErrorInternalServerError("Invalid SMTP_PORT"))?,
+        smtp_port: env_var("SMTP_PORT").parse().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid SMTP_PORT"))?,
         smtp_user: env_var("SMTP_USER"),
         smtp_pass: env_var("SMTP_PASS"),
         from_name: env_var("FROM_NAME"),
         from_email: env_var("FROM_EMAIL"),
     };
     let email_service = EmailService::new(email_config)
-        .map_err(|_| actix_web::error::ErrorInternalServerError("Failed to initialize Email Service"))?;
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize Email Service"))?;
     
-    let pool = DbPool::new(&env_var("DATABASE_URL"), 3); // max_connection = 3
+    let pool = DbPool::new(&env_var("DATABASE_URL"), 3) // max_connection = 3
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect to Database"))?; 
+    
     let redis = RedisManager::new(&env_var("REDIS_URL"))
-        .map_err(|_| actix_web::error::ErrorInternalServerError("Failed to connect to Redis"))?;
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect to Redis"))?;
     
     let key = env_var("AES_KEY");
     let key_bytes: &[u8; 32] = key.as_bytes().try_into()
-        .map_err(|_| actix_web::error::ErrorInternalServerError("AES_KEY must be exactly 32 bytes"))?;
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "AES_KEY must be exactly 32 bytes"))?;
+        
     let crypto_service = CryptoService::new(key_bytes)
-        .map_err(|_| actix_web::error::ErrorInternalServerError("Failed to initialize Crypto Service"))?;
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize Crypto Service"))?;
     
     let otp_service = OtpService::new(OtpConfig {
         secret: env_var("KEY"),
@@ -107,7 +110,6 @@ async fn main() -> MainRlt {
 pub fn app_config(cfg: &mut web::ServiceConfig) {
     cfg.service(index_file);
 }
-
 ```
 ## 2. Framework Type Aliases
 **fr-rust** provides semantic type wrappers over base actix-web engines to accelerate development flow:
@@ -369,6 +371,7 @@ async fn test_crypto(crypto: web::Data<CryptoService>) -> Result<Rsp, actix_web:
 Streamline error handling in your HTTP routes using the built-in `http_error!` macro. This intercepts failures and automatically formats the error response for the client.
 
 ```rust
+// Easy, Better & Clean Error Handling will be coming soon!
 use actix_web::{get};
 use fr_rust::prelude::*;
 
