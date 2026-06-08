@@ -368,7 +368,7 @@ async fn test_crypto(crypto: web::Data<CryptoService>) -> Result<Rsp, actix_web:
 
 ## 9. Error Handling
 
-Streamline error handling in your HTTP routes using the built-in `http_error!` macro. This intercepts failures and automatically formats the error response for the client.
+Streamline error handling in your HTTP routes using the built-in `try_catch!` macro. This intercepts failures and automatically formats the error response for the client (not production ready yet).
 
 ```rust
 // Easy, Better & Clean Error Handling will be coming soon!
@@ -378,9 +378,12 @@ use fr_rust::prelude::*;
 #[get("/hello")]
 async fn do_something() -> Rsp {
     // Evaluates the future; if it fails, immediately returns the custom error message to the client
-    let data = http_error!(
-        my_async_function().await,
-        "Failed to process request data"
+    let data = try_catch!(
+        try my_async_function().await,
+        catch error => {
+            println!("Failed to process request data: {:?}", error);
+            return http_bad("Error occurred!")
+        }
     );
     // If Everything is fine:
     send_str("Hello, World!")
