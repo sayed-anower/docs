@@ -74,9 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut document_tags = vec!["programming".to_string(), "rust".to_string()];
 
     // Programmatically extract additional classifications
-    if let Some(tags) = tagger.generate_tags(body_text) {
-        document_tags.append(tags);
-    }
+    let mut tags = tagger.generate_tags(body_text.to_string());
+    document_tags.append(&mut tags);
 
     // [!] At this point, document_tags can be mirrored safely to an RDBMS
 
@@ -101,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Document Scanning and Query Matching
     let limit = 10;
     let offset = 0;
-    let results = searcher.search("keyword".to_string(), limit, offset).await?;
+    let results = searcher.search("keyword", limit, offset)?;
 
     // Evicting a document from the collection
     searcher.del_doc("1".to_string()).await?;
@@ -124,7 +123,7 @@ pub fn generate_cluster_id() -> u64 {
     let next_id = sf.next_id().expect("System clock skew or drift detected");
 
     println!("Generated ID: {}", next_id);
-    next_id
+    *next_id
 }
 
 ```
