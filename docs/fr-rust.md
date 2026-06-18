@@ -1,6 +1,9 @@
 # fr-rust Documentation
+
 >[!IMPORTANT]
 > Unfortunately, the documentation is not for latest & most stable version.
+
+
 **fr-rust** is a comprehensive, high-performance web utility ecosystem built on top of Actix-Web. It provides production-ready, out-of-the-box support for DDoS protection, standardized HTTP responses, room-based WebSockets, Redis connection pooling, secure cryptography, and essential authentication services (JWT, OTP, Link Verification, Email).
 
 ---
