@@ -29,33 +29,20 @@ Initialize shared state, establish safe application contexts, and protect your e
 ```rust
 use fr_rust::prelude::*;
 
-#[web_main]
-async fn main() -> Main  {
-  let app_state = AppState {
-    db_pool,
-    jwt
-  };
-  let ip = env_or_default("IP", "0.0.0.0");
-  let port = env_or_default("PORT", "8080");
-  let address = format!("{ip}:{port}");
-
-  run_server!(
-    state: app_state,
-    config: config,
-    addr: "0.0.0.0:8080",
-    app: {
-        .wrap(actix_web::middleware::Logger::default())
-        .app_data(web::PayloadConfig::new(10 * 1024 * 1024)) // 10MB
-    },
-    server: {
-        .workers(num_cpus::get() * 2)
-        .shutdown_timeout(120)
-    }
-);
+// ========== Shared Application State ==========
+#[derive(Clone)] // if your services implement Clone; adjust as needed
+pub struct AppState {
+    pub email_service: EmailService,
+    pub pool: DbPool,
+    pub redis: RedisManager,
+    pub crypto_service: CryptoService,
+    pub otp_service: OtpService,
+    pub linkv_service: LinkV,
+    pub jwt: JwtService,
+    pub ws: WsManager,
 }
 
-
-
+// ========== Route Configuration ==========
 fn config(cfg: &mut ServiceConfig) {
     // Simple routes
     get!("/health", health_check);
@@ -77,6 +64,106 @@ fn config(cfg: &mut ServiceConfig) {
         get!("/stats", get_stats);
         post!("/users", admin_create_user);
     });
+}
+
+// ========== Main ==========
+#[web_main]
+async fn main() -> Main {
+    // 1. Load environment variables
+    load_env();
+
+    // 2. Build DDoS Shield Middleware
+    let ddos_shield = DdosShield::builder()
+        .max_requests(5)
+        .window_secs(1)
+        .ban_duration_secs(20)
+        .block_agent("malicious-bot")
+        .allow_missing_ua(false)
+        .build();
+
+    // 3. Initialize all services (with explicit error handling)
+    let jwt_secret = env_var("JWT_SECRET");
+    let jwt = JwtService::new(jwt_secret);
+
+    let email_config = EmailConfig {
+        smtp_host: env_var("SMTP_HOST"),
+        smtp_port: env_var("SMTP_PORT")
+            .parse()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid SMTP_PORT"))?,
+        smtp_user: env_var("SMTP_USER"),
+        smtp_pass: env_var("SMTP_PASS"),
+        from_name: env_var("FROM_NAME"),
+        from_email: env_var("FROM_EMAIL"),
+    };
+    let email_service = EmailService::new(email_config)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize Email Service"))?;
+
+    let pool = DbPool::new(&env_var("DATABASE_URL"), 3)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect to Database"))?;
+
+    let redis = RedisManager::new(&env_var("REDIS_URL"))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect to Redis"))?;
+
+    let key = env_var("AES_KEY");
+    let key_bytes: &[u8; 32] = key.as_bytes().try_into()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "AES_KEY must be exactly 32 bytes"))?;
+    let crypto_service = CryptoService::new(key_bytes)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize Crypto Service"))?;
+
+    let otp_service = OtpService::new(OtpConfig {
+        secret: env_var("KEY"),
+        crypto: crypto_service.clone(),
+        redis: redis.clone(),
+    });
+
+    let linkv_service = LinkV::new(LinkVConfig {
+        secret: env_var("KEY"),
+        crypto: crypto_service.clone(),
+        redis: redis.clone(),
+        jwt: jwt.clone(),
+    });
+
+    let ws = WsManager::new(WsConfig {
+        server: 1,
+        redis: redis.clone(),
+    });
+
+    // 4. Build the application state
+    let app_state = AppState {
+        email_service,
+        pool,
+        redis,
+        crypto_service,
+        otp_service,
+        linkv_service,
+        jwt,
+        ws,
+    };
+
+    // 5. Server address
+    let ip = env_or_default("IP", "0.0.0.0");
+    let port = env_or_default("PORT", "8080");
+    let address = format!("{}:{}", ip, port);
+    println!("Starting production server at http://{}", address);
+
+    // 6. Run the server with the new macro syntax
+    run_server!(
+        state: app_state,
+        config: config,
+        addr: address,
+        app: {
+            // Add DDoS shield and logger middleware
+            .wrap(ddos_shield)
+            .wrap(actix_web::middleware::Logger::default())
+            // Set payload limit (10MB)
+            .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
+            // The AppState is automatically registered via `state: app_state`
+        },
+        server: {
+            .workers(num_cpus::get() * 2)
+            .shutdown_timeout(120)
+        }
+    );
 }
 ```
 ## 2. Framework Type Aliases
