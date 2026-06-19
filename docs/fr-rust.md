@@ -1,18 +1,13 @@
 # fr-rust Documentation
 
->[!IMPORTANT]
-> Unfortunately, the documentation is not for latest & most stable version.
-
-
 **fr-rust** is a comprehensive, high-performance web utility ecosystem built on top of Actix-Web. It provides production-ready, out-of-the-box support for DDoS protection, standardized HTTP responses, room-based WebSockets, Redis connection pooling, secure cryptography, and essential authentication services (JWT, OTP, Link Verification, Email).
 
 ---
 
-## 1. Quick Start & Prerequisites
-
-### Ecosystem Dependencies
-To use **fr-rust** effectively, you must pair it with its core foundation crates. Ensure your `Cargo.toml` includes the following adjacent dependencies:
-
+## 1. Foundation & Initialization
+The framework relies on a shared, thread-safe application state and a highly declarative routing configuration.
+### 1.1 Prerequisites
+Add the ecosystem dependencies to your Cargo.toml. fr-rust requires seamless interoperability with Tokio and Actix async runtimes.
 ```toml
 [dependencies]
 fr-rust = "0.1"
@@ -24,13 +19,13 @@ tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
 ```
-### Server Entry Point & Configuration
-Initialize shared state, establish safe application contexts, and protect your endpoints using the built-in token-bucket DDoS shield.
+### 1.2 Application State & Routing
+Instead of manual App::new() closures, fr-rust uses a macro-driven approach (run_server!) to inject state and configure scopes.
 ```rust
 use fr_rust::prelude::*;
 
-// ========== Shared Application State ==========
-#[derive(Clone)] // if your services implement Clone; adjust as needed
+// 1. Define Thread-Safe Application State
+#[derive(Clone)]
 pub struct AppState {
     pub email_service: EmailService,
     pub pool: DbPool,
@@ -42,122 +37,52 @@ pub struct AppState {
     pub ws: WsManager,
 }
 
-// ========== Route Configuration ==========
+// 2. Configure Scopes and Guards
 fn config(cfg: &mut ServiceConfig) {
-    // Simple routes
     get!("/health", health_check);
     post!("/users", create_user);
 
-    // Route with guard / extra config
-    get!("/admin/dashboard", admin_dashboard, guard(::actix_web::guard::Header("role", "admin")));
-
-    // Simple scope
-    scope!("/api", {
-        get!("/users", get_users);
-        post!("/users", create_user);
-        get!("/users/{id}", get_user);
-        put!("/users/{id}", update_user, guard(::actix_web::guard::Not(::actix_web::guard::Header("readonly", "true"))));
-    });
-
-    // Scope with guard + middleware
+    // Guarded Scope
     scope!("/admin", guard(::actix_web::guard::Header("admin", "true")), {
         get!("/stats", get_stats);
         post!("/users", admin_create_user);
     });
 }
 
-// ========== Main ==========
+```
+### 1.3 Server Bootstrapping & DDoS Shield
+The web_main macro initializes the Tokio runtime. You must instantiate your services, configure the DdosShield middleware, and bind the server.
+```rust
 #[web_main]
 async fn main() -> Main {
-    // 1. Load environment variables
     load_env();
 
-    // 2. Build DDoS Shield Middleware
+    // Configure Token-Bucket Rate Limiting
     let ddos_shield = DdosShield::builder()
-        .max_requests(5)
-        .window_secs(1)
-        .ban_duration_secs(20)
-        .block_agent("malicious-bot")
-        .allow_missing_ua(false)
+        .max_requests(100)
+        .window_secs(60)
+        .ban_duration_secs(3600)
+        .block_agent("badbot")
+        .cleanup_interval_secs(300)
+        .max_ip_records(5000)
         .build();
 
-    // 3. Initialize all services (with explicit error handling)
-    let jwt_secret = env_var("JWT_SECRET");
-    let jwt = JwtService::new(jwt_secret);
+    // Initialize Services (Error mapping omitted for brevity)
+    let jwt = JwtService::new(env_var("JWT_SECRET"));
+    let pool = DbPool::new(&env_var("DATABASE_URL"), 3).unwrap();
+    let redis = RedisManager::new(&env_var("REDIS_URL")).unwrap();
+    
+    let app_state = AppState { /* ... */ };
 
-    let email_config = EmailConfig {
-        smtp_host: env_var("SMTP_HOST"),
-        smtp_port: env_var("SMTP_PORT")
-            .parse()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid SMTP_PORT"))?,
-        smtp_user: env_var("SMTP_USER"),
-        smtp_pass: env_var("SMTP_PASS"),
-        from_name: env_var("FROM_NAME"),
-        from_email: env_var("FROM_EMAIL"),
-    };
-    let email_service = EmailService::new(email_config)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize Email Service"))?;
-
-    let pool = DbPool::new(&env_var("DATABASE_URL"), 3)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect to Database"))?;
-
-    let redis = RedisManager::new(&env_var("REDIS_URL"))
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect to Redis"))?;
-
-    let key = env_var("AES_KEY");
-    let key_bytes: &[u8; 32] = key.as_bytes().try_into()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "AES_KEY must be exactly 32 bytes"))?;
-    let crypto_service = CryptoService::new(key_bytes)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize Crypto Service"))?;
-
-    let otp_service = OtpService::new(OtpConfig {
-        secret: env_var("KEY"),
-        crypto: crypto_service.clone(),
-        redis: redis.clone(),
-    });
-
-    let linkv_service = LinkV::new(LinkVConfig {
-        secret: env_var("KEY"),
-        crypto: crypto_service.clone(),
-        redis: redis.clone(),
-        jwt: jwt.clone(),
-    });
-
-    let ws = WsManager::new(WsConfig {
-        server: 1,
-        redis: redis.clone(),
-    });
-
-    // 4. Build the application state
-    let app_state = AppState {
-        email_service,
-        pool,
-        redis,
-        crypto_service,
-        otp_service,
-        linkv_service,
-        jwt,
-        ws,
-    };
-
-    // 5. Server address
-    let ip = env_or_default("IP", "0.0.0.0");
-    let port = env_or_default("PORT", "8080");
-    let address = format!("{}:{}", ip, port);
-    println!("Starting production server at http://{}", address);
-
-    // 6. Run the server with the new macro syntax
+    // Execute Server
     run_server!(
         state: app_state,
         config: config,
-        addr: address,
+        addr: "0.0.0.0:8080",
         app: {
-            // Add DDoS shield and logger middleware
             .wrap(ddos_shield)
             .wrap(actix_web::middleware::Logger::default())
-            // Set payload limit (10MB)
-            .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
-            // The AppState is automatically registered via `state: app_state`
+            .app_data(web::PayloadConfig::new(10 * 1024 * 1024)) // 10MB Limit
         },
         server: {
             .workers(num_cpus::get() * 2)
@@ -165,889 +90,236 @@ async fn main() -> Main {
         }
     );
 }
+
 ```
-## 2. Framework Type Aliases
-**fr-rust** provides semantic type wrappers over base actix-web engines to accelerate development flow:
-| Type Alias | Native Equivalent | Context/Description |
+## 2. The Unified Response Matrix
+fr-rust abstracts raw HttpResponse construction into highly optimized, allocation-aware helper functions.
+### 2.1 Standard Data Responses
+| Helper | HTTP | Payload Type | Allocation Profile | Ideal Use Case |
+|---|---|---|---|---|
+| http_ok_static(msg) | 200 | &'static str | Zero-allocation | Health checks, constants. |
+| send_json(data) | 200 | impl Serialize | Serde serialization | Type-safe struct returns. |
+| http_ok_json(data) | 200 | serde_json::json! | Dynamic allocation | Ad-hoc or dynamic JSON. |
+| http_bad_static(msg) | 400 | &'static str | Zero-allocation | Standard validation failures. |
+| http_bad_json(data) | 400 | JSON | Dynamic allocation | Structured API error bodies. |
+### 2.2 Advanced & Status-Specific Responses
+| Helper | HTTP | Purpose |
 |---|---|---|
-| Rsp | HttpResponse | Default wrapper for outbound server responses. |
-| Rqs | HttpRequest | Standard request metadata representation. |
-| Rlt | Result<(), actix_web::Error> | Universal Fallible Internal Actix action. |
-| Main | std::io::Result<()> | Standard runtime entry return contract. |
-| FileRlt | Result<actix_files::NamedFile, actix_web::Error> | Clean targeted static file streamer token. |
-## 3. Unified Responses & Routing
-### Efficient Static File Delivery
+| http_created(loc) | 201 | Resource creation. Returns a Location header. |
+| http_no_content() | 204 | Successful updates/deletes with no body needed. |
+| http_unauthorized() | 401 | Missing or invalid authentication credentials. |
+| http_forbidden(msg) | 403 | Insufficient permissions for the requested resource. |
+| http_not_found(msg) | 404 | Target resource does not exist in the datastore. |
+| http_too_many_requests(s) | 429 | Rate limit exceeded. Returns Retry-After: {s}. |
+### 2.3 Streaming, Files, and Compression
+File handling in fr-rust utilizes OS-level optimizations (like mmap where applicable) to reduce memory overhead.
 ```rust
-#[get("/")]
-pub async fn index_file() -> FileRlt {
-    send_file("./static/index.html").await
+// 1. Static File Serving (Zero-copy with ETag/Cache handling)
+#[get("/static/{file}")]
+async fn serve_static(req: HttpRequest, path: web::Path<String>) -> Result<NamedFile, Error> {
+    send_file_fast(&format!("./static/{}", path.into_inner()), &req).await
 }
 
-```
-### Global Response Matrix
-Use these optimized abstractions instead of manually assembling raw HttpResponse states:
-
-### Basic Response Helpers
-
-| Response Helper | HTTP Status | Payload Type | When to Use |
-|-----------------|-------------|--------------|-------------|
-| `http_ok(msg)` | 200 OK | Plain text / String slice | Simple success messages, status updates |
-| `http_ok_static(msg)` | 200 OK | Static string (&'static str) | **Fastest** - Error messages, constants |
-| `http_bad(msg)` | 400 Bad Request | Error Message String slice | Validation failures, malformed requests |
-| `http_bad_static(msg)` | 400 Bad Request | Static string (&'static str) | **Fastest** - Common error messages |
-| `send_str(msg)` | 200 OK | Evaluated String | Dynamic string content from variables |
-| `send_json(data)` | 200 OK | Structs/Vectors with Serialize | **Preferred** - Type-safe JSON responses |
-| `http_ok_json(data)` | 200 OK | Ad-hoc serde_json::json! | Quick prototyping, dynamic structures |
-| `http_bad_json(data)` | 400 Bad Request | JSON-formatted errors | Structured error responses |
-
-### Advanced Status Codes
-
-| Response Helper | HTTP Status | When to Use |
-|-----------------|-------------|-------------|
-| `http_no_content()` | 204 No Content | PUT/POST updates with no response body |
-| `http_created(location)` | 201 Created | Resource creation (returns Location header) |
-| `http_accepted()` | 202 Accepted | Async operations, batch processing |
-| `http_partial_content(data, range, total)` | 206 Partial Content | Video streaming, resume downloads |
-| `http_unauthorized(realm)` | 401 Unauthorized | Missing/invalid authentication |
-| `http_forbidden(msg)` | 403 Forbidden | Insufficient permissions |
-| `http_not_found(msg)` | 404 Not Found | Resource doesn't exist |
-| `http_method_not_allowed(methods)` | 405 Method Not Allowed | Wrong HTTP method (returns Allow header) |
-| `http_conflict(msg)` | 409 Conflict | Resource version conflict, duplicate entry |
-| `http_unsupported_media(msg)` | 415 Unsupported Media Type | Wrong Content-Type |
-| `http_too_many_requests(secs)` | 429 Too Many Requests | Rate limiting (returns Retry-After) |
-| `http_server_error(msg)` | 500 Internal Server Error | Unexpected server errors |
-| `http_service_unavailable(secs)` | 503 Service Unavailable | Maintenance mode (returns Retry-After) |
-
-### Streaming & Large Data
-
-| Response Helper | Use Case | Memory Usage |
-|-----------------|----------|--------------|
-| `http_ok_stream(stream)` | Large responses, real-time data | Minimal (~64KB buffer) |
-| `send_file(path)` | Static files, downloads | OS-level zero-copy |
-| `send_file_fast(path, req)` | **Fastest** - Static files with caching | Zero-copy with mmap |
-| `send_file_range(path, range)` | Video streaming, partial downloads | Only requested bytes |
-
-### Compression Helpers
-
-| Response Helper | Compression Type | Best For |
-|-----------------|------------------|----------|
-| `http_brotli(data, quality)` | Brotli (20-30% better than gzip) | Text/JSON APIs, static assets |
-| `http_lz4(data)` | LZ4 (10x faster than gzip) | Real-time APIs, low-latency |
-
-### Upload/File Processing
-
-| Response Helper | Use Case | Memory Pattern |
-|-----------------|----------|----------------|
-| `upload_file(payload, dir)` | Simple file uploads | All in memory (small files) |
-| `upload_streaming(payload, dir)` | Large file uploads | Streaming to disk (low memory) |
-| `upload_with_progress(payload, dir, cb)` | Uploads with progress tracking | Streaming with callbacks |
-| `parse_multipart_stream(payload, handler)` | Custom multipart processing | Chunk-by-chunk processing |
-
----
-
-## Framework Usage Guide
-
-### 1. Setting Up Your Application
-
-```rust
-#[web_main]
-async fn main() -> Main {
-    // Set Up Your Server Here With FrRust...
-}
-```
-
-### 2. Response Helper Decision Tree
-
-```
-Need to return data?
-├── Yes
-│   ├── JSON?
-│   │   ├── Yes
-│   │   │   ├── Type-safe struct? → send_json(data)
-│   │   │   ├── Dynamic structure? → http_ok_json(json!({...}))
-│   │   │   └── Large JSON (>1MB)? → http_brotli(data, quality) or http_lz4(data)
-│   │   └── No
-│   │       ├── Static string? → http_ok_static("message")
-│   │       ├── Dynamic string? → send_str(variable)
-│   │       └── Large text (>100KB)? → http_ok_stream(stream)
-│   └── File?
-│       ├── Static file? → send_file_fast(path, req)
-│       ├── Video/audio? → send_file_range(path, range_header)
-│       └── Large download? → send_file(path)
-└── No
-    ├── Resource created? → http_created("/resource/123")
-    ├── Accepted async? → http_accepted()
-    └── No content? → http_no_content()
-```
-
-### 3. Error Handling Patterns
-
-```rust
-// Simple error responses
-async fn validate_user(id: u64) -> HttpResponse {
-    if id == 0 {
-        return http_bad_static("User ID must be positive");
-    }
-    
-    match get_user_from_db(id).await {
-        Ok(user) => send_json(user),
-        Err(DbError::NotFound) => http_not_found("User not found"),
-        Err(DbError::Permission) => http_forbidden("Access denied"),
-        Err(_) => http_server_error("Database error"),
-    }
+// 2. Range Requests (For Video/Audio Streaming)
+async fn stream_media(req: HttpRequest, path: web::Path<String>) -> Result<HttpResponse, Error> {
+    let range = req.headers().get(header::RANGE).and_then(|h| h.to_str().ok());
+    send_file_range(&format!("./media/{}", path.into_inner()), range).await
 }
 
-// Structured JSON errors
-async fn api_handler(data: web::Json<Request>) -> HttpResponse {
-    if data.name.is_empty() {
-        return http_bad_json(json!({
-            "error": "Validation failed",
-            "field": "name",
-            "reason": "Name cannot be empty"
-        }));
-    }
-    
-    // ... processing
-}
-```
-
-### 4. File Serving Implementation
-
-```rust
-use actix_web::web::Path;
-use actix_web::HttpRequest;
-
-// Simple file server
-async fn serve_files(
-    req: HttpRequest,
-    path: Path<String>,
-) -> Result<NamedFile, Error> {
-    let filename = path.into_inner();
-    let filepath = format!("./static/{}", filename);
-    
-    // Automatic: ETag, Last-Modified, cache control
-    send_file_fast(&filepath, &req).await
-}
-
-// Video streaming with range support
-async fn stream_video(
-    req: HttpRequest,
-    path: Path<String>,
-) -> Result<HttpResponse, Error> {
-    let video_path = format!("./videos/{}.mp4", path.into_inner());
-    
-    // Check for Range header
-    let range_header = req.headers()
-        .get(header::RANGE)
-        .and_then(|h| h.to_str().ok());
-    
-    send_file_range(&video_path, range_header).await
-}
-```
-
-### 5. Upload Implementation
-
-```rust
-use actix_multipart::Multipart;
-
-// Standard upload (small files)
-async fn upload_handler(
-    mut payload: Multipart,
-) -> Result<HttpResponse, Error> {
-    let files = upload_file(payload, "./uploads").await?;
-    
-    http_ok_json(json!({
-        "status": "success",
-        "files": files,
-        "count": files.len()
-    }))
-}
-
-// Large file upload with progress
-async fn upload_large_handler(
-    mut payload: Multipart,
-) -> Result<HttpResponse, Error> {
-    let files = upload_with_progress(
-        payload, 
-        "./uploads",
-        |filename, bytes, _total| {
-            // You can send WebSocket updates here
-            println!("Uploading {}: {} bytes", filename, bytes);
-        }
-    ).await?;
-    
-    http_ok_json(json!({
-        "status": "success", 
-        "files_uploaded": files
-    }))
-}
-
-// Streaming upload (lowest memory usage)
-async fn upload_stream_handler(
-    mut payload: Multipart,
-) -> Result<HttpResponse, Error> {
-    let files = upload_streaming(payload, "./uploads").await?;
-    http_ok(json!({"status": "success", "files": files}).to_string())
-}
-```
-
-### 6. Streaming Large Data
-
-```rust
-use futures_util::stream;
-
-// Stream logs in real-time
-async fn stream_logs() -> HttpResponse {
-    let stream = stream::unfold(0, |counter| async move {
-        if counter >= 1000 {
-            None
-        } else {
-            let line = format!("Log entry {}\n", counter);
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            Some(Ok::<_, Error>(Bytes::from(line)))
-        }
-    });
-    
-    http_ok_stream(Box::pin(stream))
-}
-
-// Stream from database
-async fn stream_users_from_db(pool: &PgPool) -> HttpResponse {
-    let stream = sqlx::query_as::<_, User>("SELECT * FROM users")
-        .fetch_stream(pool)
-        .await
-        .unwrap()
-        .map_ok(|user| Bytes::from(serde_json::to_vec(&user).unwrap()));
-    
-    http_ok_stream(Box::pin(stream))
-}
-```
-
-### 7. Compression Implementation
-
-```rust
+// 3. Compression (Brotli for Text/JSON, LZ4 for Real-time speed)
 async fn get_compressed_data() -> HttpResponse {
-    let data = generate_large_dataset(); // Your data
-    
-    // Check Accept-Encoding header (browser sends this)
-    // Use Brotli for text (20-30% better compression)
-    http_brotli(&data, 6)  // Quality 0-11, 6 is balanced
-    
-    // OR use LZ4 for speed (10x faster decompression)
-    // http_lz4(&data)
+    let raw_data = generate_large_json();
+    http_brotli(&raw_data, 6) // Quality 6 offers optimal size/speed ratio
 }
 
-// Content negotiation example
-async fn smart_compression(req: HttpRequest) -> HttpResponse {
-    let data = generate_2mb_response();
-    let json = serde_json::to_vec(&data).unwrap();
-    
-    let accept_encoding = req.headers()
-        .get(header::ACCEPT_ENCODING)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    
-    if accept_encoding.contains("br") {
-        http_brotli(&json, 6)
-    } else if accept_encoding.contains("gzip") {
-        // Use actix's built-in gzip
-        HttpResponse::Ok()
-            .insert_header((header::CONTENT_ENCODING, "gzip"))
-            .body(compress_gzip(&json))
-    } else if accept_encoding.contains("lz4") {
-        http_lz4(&json)
-    } else {
-        send_json(&data)
-    }
-}
 ```
-
-### 8. REST API Examples
-
+### 2.4 Multipart Upload Implementation
 ```rust
-// Create resource
-async fn create_user(user: web::Json<UserCreate>) -> HttpResponse {
-    let id = db.insert(user.into_inner()).await?;
-    http_created(&format!("/users/{}", id))
+// Streaming upload prevents memory exhaustion on large files
+async fn upload_handler(mut payload: actix_multipart::Multipart) -> Result<HttpResponse, Error> {
+    let files = upload_streaming(payload, "./uploads").await?;
+    http_ok_json(json!({ "status": "success", "files": files }))
 }
 
-// Get resource
-async fn get_user(id: web::Path<u64>) -> HttpResponse {
-    match db.find_user(*id).await {
-        Some(user) => send_json(user),
-        None => http_not_found("User not found")
-    }
-}
-
-// Update resource
-async fn update_user(
-    id: web::Path<u64>,
-    update: web::Json<UserUpdate>,
-) -> HttpResponse {
-    let updated = db.update(*id, update.into_inner()).await?;
-    send_json(updated)
-}
-
-// Delete resource
-async fn delete_user(id: web::Path<u64>) -> HttpResponse {
-    db.delete(*id).await?;
-    http_no_content()
-}
 ```
-
-### 9. Rate Limiting Implementation
-
+## 3. Real-Time Communications: WsManager
+WsManager bypasses the traditional Actix actor model in favor of a thread-safe, asymmetric channel mapping architecture.
+### 3.1 WebSocket Handshake & Event Loop
 ```rust
-use std::collections::HashMap;
-use std::sync::Mutex;
-use chrono::Utc;
-
-async fn rate_limited_endpoint(req: HttpRequest) -> HttpResponse {
-    let ip = req.connection_info().realip_remote_addr().unwrap_or("unknown");
-    
-    if !check_rate_limit(ip) {
-        return http_too_many_requests(30);  // Retry after 30 seconds
-    }
-    
-    http_ok("Request processed successfully")
-}
-
-// With custom message
-async fn limited_api() -> HttpResponse {
-    if is_rate_limited() {
-        return http_bad_json(json!({
-            "error": "Rate limit exceeded",
-            "retry_after": 60,
-            "limit": 100,
-            "remaining": 0
-        }));
-    }
-    
-    send_json(normal_response())
-}
-```
-
----
-
-## Performance Tips by Use Case
-
-### Production API (~100 req/sec)
-```rust
-// Use these for best performance
-http_ok_static("OK")        // Health checks
-send_json(&data)            // All JSON responses
-http_bad_static("Invalid")  // Common errors
-```
-
-### High-Throughput API (~10,000 req/sec)
-```rust
-// Add compression and caching
-http_brotli(&data, 4)       // Lower quality for speed
-send_file_fast(path, req)   // Zero-copy file serving
-http_ok_stream(stream)      // Memory-efficient responses
-```
-
-### Media Server (Video/Audio)
-```rust
-// Use range requests
-send_file_range(video_path, range)  // Supports seeking
-send_file_fast(path, req)           // HTTP/2 + caching
-```
-
-### Real-Time API (WebSocket/SSE)
-```rust
-http_ok_stream(stream)      // Server-sent events
-http_lz4(&data)             // Fastest compression
-http_no_content()           // Ack responses
-```
-
----
-
-## Common Patterns & Anti-Patterns
-
-### ✅ DO: Use static strings for errors
-```rust
-http_bad_static("Invalid input")  // Fastest
-```
-
-### ❌ DON'T: Allocate strings unnecessarily
-```rust
-http_bad(&format!("Error: {}", msg))  // Slower
-```
-
-### ✅ DO: Use streaming for large responses
-```rust
-http_ok_stream(stream_data())
-```
-
-### ❌ DON'T: Load entire file into memory
-```rust
-let data = std::fs::read("large.mp4")?;  // Bad for >100MB
-HttpResponse::Ok().body(data)
-```
-
-### ✅ DO: Use send_file for static files
-```rust
-send_file_fast("static/image.jpg", &req).await
-```
-
-### ❌ DON'T: Manually set cache headers
-```rust
-// Let send_file_fast handle ETag/Last-Modified automatically
-```
-
-### ✅ DO: Use proper status codes
-```rust
-http_created("/users/123")  // Correct for creation
-http_no_content()           // Correct for successful deletes
-```
-
-### ❌ DON'T: Return 200 for all responses
-```rust
-http_ok("Deleted")  // Wrong! Use http_no_content()
-```
-## 4. Multi-room WebSockets (WsManager)
-Built over the actix-ws asymmetric handling architecture, the internal WsManager provides abstract, thread-safe memory tables tracking channel mappings across endpoints.
-```rust
-use tokio::sync::mpsc;
-
 #[get("/ws/{user_id}")]
 async fn ws_handler(
     req: HttpRequest,
     body: web::Payload,
     ws_manager: web::Data<WsManager>,
     path: web::Path<String>,
-) -> Result<Rsp, actix_web::Error> {
+) -> Result<HttpResponse, actix_web::Error> {
     let user_id = path.into_inner();
 
-    // 1. Establish an asynchronous bounded channel to prevent backpressure issues (128 depth)
-    let (tx, mut rx) = mpsc::channel::<String>(128);
+    // Establish a bounded async channel to prevent backpressure (depth: 128)
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(128);
 
-    // 2. Safely perform the WebSocket upgrade handshake
+    // Safely execute the HTTP -> WS Upgrade
     let (res, mut session, mut msg_stream) = match actix_ws::handle(&req, body) {
         Ok(parts) => parts,
-        Err(err) => return Ok(http_bad(&format!("Handshake failure: {}", err))), 
+        Err(e) => return Ok(http_bad(&format!("Handshake failed: {}", e))), 
     };
 
-    // 3. Thread-safe user registration inside the state manager
+    // Register channel transmitter to the global state
     ws_manager.register(&user_id, tx);
 
-    // [Your core async read/write event loop goes here...]
-
+    // Note: The async read/write event loop logic resides here
     Ok(res)
 }
 
 ```
-### Manager Capabilities Cheat Sheet
+### 3.2 WsManager Capabilities
 ```rust
 // Room Operations
-ws_manager.join_room(&user_id, "lobby_room");
-ws_manager.leave_room(&user_id, "lobby_room");
-ws_manager.drop_room("lobby_room");
-
-// Disconnect Strategy
-ws_manager.drop_user(&user_id);
+ws_manager.join_room(&user_id, "trading_desk");
+ws_manager.leave_room(&user_id, "trading_desk");
 
 // Targeted Pub/Sub Propagation
-ws_manager.msg_user(&user_id, "Direct Message".to_string());
-ws_manager.msg_room("lobby_room", UserMsg::new("System", "lobby_room", "Hello Room!"));
-ws_manager.broadcast("Global maintenance alert!".to_string());
+ws_manager.msg_user(&user_id, "Order executed.");
+ws_manager.msg_room("trading_desk", UserMsg::new("System", "trading_desk", "Market Open"));
+ws_manager.broadcast("Server maintenance in 5 minutes.");
+
+// Lifecycle Management
+ws_manager.drop_user(&user_id);
+ws_manager.drop_room("trading_desk");
 
 ```
-## 5. Non-Blocking Database Engine
-Direct execution wrapper maps across your connections gracefully via AppData<DbPool>.
+## 4. Data Persistence & Caching Layers
+### 4.1 Non-Blocking Database Engine (DbPool)
+Direct execution wrappers mapped across pooled connections.
 ```rust
-#[get("/test/db")]
-async fn test_db(pool: web::Data<DbPool>) -> Result<Rsp, actix_web::Error> {
-    // 1. Execute DDL/DML statements
-    pool.execute("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT);", &[]).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-        
-    pool.execute("INSERT INTO users (name) VALUES ($1);", &[&"Alice"]).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
+async fn process_user(pool: web::Data<DbPool>) -> Result<HttpResponse, Error> {
+    // Parameterized DML Execution
+    pool.execute(
+        "INSERT INTO users (name, role) VALUES ($1, $2);", 
+        &[&"Alice", &"admin"]
+    ).await.map_err(ErrorInternalServerError)?;
     
-    // 2. Fetch Datasets
-    let _rows = pool.query("SELECT id, name FROM users;", &[]).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-    
-    // 3. Fallback Mapping Strategy for Options
-    let maybe_row = pool.query_opt("SELECT name FROM users WHERE id = $1;", &[&999]).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-        
-    let client_msg = match maybe_row {
-        Some(row) => format!("Welcome back, {}!", row.get::<_, String>("name")),
-        None => "Target entity sequence id (999) does not exist inside records.".to_string(),
-    };
-    
-    Ok(http_ok(&client_msg))
+    // Optional Row Fetching
+    match pool.query_opt("SELECT id FROM users WHERE name = $1;", &[&"Alice"]).await {
+        Ok(Some(row)) => Ok(send_json(row.get::<_, i32>("id"))),
+        Ok(None) => Ok(http_not_found("User does not exist.")),
+        Err(e) => Ok(http_server_error(&e.to_string())),
+    }
 }
+
 ```
-## 6. Coordinated Redis Cache
-Managed cleanly over deadpool_redis and redis-rs capabilities.
+### 4.2 Coordinated Redis Architecture
+Managed via deadpool_redis to handle distributed caching and event streaming.
 ```rust
-use deadpool_redis::redis::AsyncCommands;
-use futures_util::StreamExt;
+async fn process_redis_pipeline(redis: web::Data<RedisManager>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = redis.get_connection().await?;
 
-async fn process_redis_pipeline(redis_manager: web::Data<RedisManager>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = redis_manager.get_connection().await?;
-
-    // Standard KV cache mutation
-    let _: () = conn.set("session_key", "active_payload").await?;
+    // KV Cache Mutation
+    let _: () = redis::AsyncCommands::set(&mut conn, "session_key", "active").await?;
     
     // Pub/Sub Broadcast
-    let _: () = conn.publish("event_stream", "Message data payload distributed safely").await?;
+    let _: () = redis::AsyncCommands::publish(&mut conn, "global_events", "Data synced").await?;
 
     // Streaming Event Consumer
-    let mut stream = redis_manager.subscribe("event_stream").await?;
-    while let Some(msg) = stream.next().await {
+    let mut stream = redis.subscribe("global_events").await?;
+    while let Some(msg) = futures_util::StreamExt::next(&mut stream).await {
         let payload: String = msg.get_payload()?;
-        println!("Stream event intercept: {}", payload);
+        println!("Intercepted: {}", payload);
     }
     
     Ok(())
 }
 
 ```
-## 7. Identity & Notification Services
-### 7.1 JSON Web Tokens (Jwt)
-## Features
-
-- 🔐 **Multiple Algorithms**: HS256, RS256, RS384, ES256, EdDSA
-- 🚫 **Token Blacklisting**: Built-in token revocation with automatic cleanup
-- 📦 **Multiple Token Types**: Access, Refresh, Reset, Verify, Custom
-- ⏰ **Expiration Control**: Configurable token lifetimes
-- 🔄 **Token Refresh**: Seamless refresh token rotation
-- 🛡️ **Security**: Support for RSA, ECDSA, and Ed25519
-- 🚀 **Performance**: Sharded storage with async cleanup
-
-## Quick Start
-
-### 1. Basic Setup
-
+## 5. Security & Authentication Ecosystem
+### 5.1 JSON Web Tokens (JwtService)
+A highly configurable JWT engine supporting multiple algorithms (HS256, RS256, ES256, EdDSA), built-in blacklisting, and multiple token variants.
+**Setup & Generation:**
 ```rust
-
-// Create a JWT service with HS256
-let jwt = JwtService::new_hs256("your-secret-key");
-
-// Generate an access token
-let token = jwt.generate("user-123", TokenType::Access)?;
-
-// Verify the token
-let claims = jwt.verify(&token)?;
-println!("User: {}", claims.sub);
-```
-
-### 2. With Issuer and Audience
-
-```rust
-let jwt = JwtService::new_hs256("secret")
-    .with_issuer("my-app")
-    .with_audience("my-api");
-
-let token = jwt.generate("user-123", TokenType::Access)?;
-```
-
-### 3. Using the Macro
-
-```rust
-// Quick setup with macro
-let jwt = setup_jwt!("secret", "my-app", "my-api");
-```
-
-### 4. With Token Blacklisting
-
-```rust
-// Create blacklist with cleanup every 5 minutes
+// Initialize with Sharded Blacklist (Cleans up every 300s)
 let blacklist = TokenBlacklist::new(300);
-
-let jwt = JwtService::new_hs256("secret")
+let jwt = JwtService::new_hs256("secret-key")
+    .with_issuer("fr-rust-core")
     .with_blacklist(blacklist);
 
-// Generate token
-let token = jwt.generate("user-123", TokenType::Access)?;
+// Generate Standard Access Token (15m expiry)
+let token = jwt.generate("user_99", TokenType::Access)?;
 
-// Verify (will check blacklist)
-let claims = jwt.verify(&token)?;
-
-// Revoke token
-jwt.revoke_token(&token)?;
-```
-
-## Core Concepts
-
-### Token Types
-
-| Type | Duration | Use Case |
-|------|----------|----------|
-| `TokenType::Access` | 15 minutes | Short-lived API access |
-| `TokenType::Refresh` | 7 days | Long-lived refresh tokens |
-| `TokenType::Reset` | 1 hour | Password reset links |
-| `TokenType::Verify` | 24 hours | Email verification |
-| `TokenType::Custom(u64)` | Custom | Your own use cases |
-
-### Claims Structure
-
-```rust
-pub struct Claims {
-    pub sub: String,        // Subject (user ID)
-    pub exp: usize,         // Expiration timestamp
-    pub iat: usize,         // Issued at timestamp
-    pub jti: String,        // Unique token ID
-    pub iss: Option<String>, // Issuer
-    pub aud: Option<String>, // Audience
-    pub nbf: Option<usize>,  // Not before timestamp
-    pub custom: serde_json::Map<String, serde_json::Value>, // Custom claims
-}
-```
-
-## Usage Examples
-
-### Generating Tokens
-
-```rust
-// Generate a simple token
-let token = jwt.generate("user-123", TokenType::Access)?;
-
-// Generate with custom expiration
-let token = jwt.generate_exp_token("user-123", 1234567890)?;
-
-// Generate with custom claims
-let claims = Claims::new("user-123")
-    .with_issuer("my-app")
-    .with_custom("role".to_string(), json!("admin"));
-
+// Generate Custom Claims
+let claims = Claims::new("user_99")
+    .with_custom("clearance_level".to_string(), serde_json::json!(4));
 let token = jwt.generate_with_claims(claims, TokenType::Access)?;
 
-// Generate both access and refresh tokens
-let (access, refresh) = jwt.generate_pair("user-123")?;
 ```
-
-### Verifying Tokens
-
+**Verification & Revocation:**
 ```rust
-// Normal verification with all checks
-let claims = jwt.verify(&token)?;
+// Verify Token
+match jwt.verify(&token) {
+    Ok(claims) => println!("Valid JWT for User: {}", claims.sub),
+    Err(JwtError::TokenExpired) => println!("Token lifetime exceeded."),
+    Err(JwtError::TokenRevoked) => println!("Token exists on blacklist."),
+    Err(_) => println!("Signature validation failed."),
+}
 
-// Quick check (returns bool)
-let is_valid = jwt.verify_token(&token);
-
-// Verify without expiration check
-let claims = jwt.verify_without_expiry(&token)?;
-
-// Extract claims without validation (debug only)
-let claims = jwt.peek_claims(&token);
-```
-
-### Token Management
-
-```rust
-// Refresh access token using refresh token
-let new_access = jwt.refresh_access(&refresh_token)?;
-
-// Revoke a token
+// Revoke Token manually via JTI (JWT ID)
 jwt.revoke_token(&token)?;
 
-// Revoke by JTI (Token ID)
-jwt.revoke_by_jti(&claims.jti, claims.exp)?;
-
-// Check if token is revoked
-let is_revoked = jwt.is_revoked(&claims.jti);
 ```
-
-### Extracting Information
-
+### 5.2 Cryptography Service
+Asynchronous hashing and symmetric encryption to prevent thread-blocking during heavy cryptographic workloads.
 ```rust
-// Extract various claims without full verification
-let subject = jwt.extract_subject(&token);
-let expiry = jwt.get_token_expiry(&token);
-let jti = jwt.get_token_jti(&token);
-let issuer = jwt.get_token_issuer(&token);
-let audience = jwt.get_token_audience(&token);
-```
-
-## Advanced Configuration
-
-### RSA/ECDSA/EdDSA Support
-
-```rust
-// RSA
-let private_key = std::fs::read("private.pem")?;
-let public_key = std::fs::read("public.pem")?;
-let jwt = JwtService::new_rs256(&private_key, &public_key)?;
-
-// ECDSA P-256
-let jwt = JwtService::new_ecdsa_p256(&private_key, &public_key)?;
-
-// Ed25519
-let jwt = JwtService::new_ed25519(&private_key, &public_key)?;
-```
-
-### Custom Validation
-
-```rust
-let jwt = JwtService::new_hs256("secret")
-    .with_leeway(60)           // 60 seconds clock skew tolerance
-    .disable_exp_validation()  // Disable expiration checks
-    .with_issuer("my-app")
-    .with_audience("my-api");
-```
-
-### Custom Token Duration
-
-```rust
-// 1 hour token
-let token = jwt.generate("user-123", TokenType::Custom(3600))?;
-```
-
-## Error Handling
-
-```rust
-match jwt.verify(&token) {
-    Ok(claims) => {
-        // Valid token
-    }
-    Err(JwtError::TokenExpired) => {
-        // Handle expired token
-    }
-    Err(JwtError::InvalidSignature) => {
-        // Handle invalid signature
-    }
-    Err(JwtError::TokenRevoked) => {
-        // Handle revoked token
-    }
-    Err(e) => {
-        // Handle other errors
-    }
-}
-```
-
-## Blacklist Management
-
-```rust
-// Create with custom cleanup interval
-let blacklist = TokenBlacklist::new(600); // 10 minutes
-
-// Check blacklist stats
-let count = blacklist.len();
-let empty = blacklist.is_empty();
-
-// Add to service
-let jwt = JwtService::new_hs256("secret")
-    .with_blacklist(blacklist);
-```
-
-## Best Practices
-
-1. **Secret Management**: Use strong secrets (32+ bytes) and store them securely
-2. **Token Expiration**: Use appropriate token lifetimes for your use case
-3. **Blacklisting**: Always enable blacklisting for production applications
-4. **Algorithm Selection**: Use HS256 for simple setups, RSA/ECDSA for distributed systems
-5. **Error Handling**: Always handle `JwtError` variants appropriately
-6. **Leeway**: Set some leeway (5-60 seconds) to handle clock skew
-
-### 7.2 OTP Challenge Routines
-```rust
-let generated_otp = otp_service.generate_otp("user_12", 6, 300).await; 
-
-// Secure verification phase
-match otp_service.verify_otp("user_12", &generated_otp).await {
-    Ok(true) => println!("OTP validation matching successful."),
-    Ok(false) => println!("Verification complete: Incorrect client OTP sequence entry."),
-    Err(e) => eprintln!("Internal Redis connectivity issue verifying OTP: {}", e),
+async fn secure_password(crypto: web::Data<CryptoService>) -> HttpResponse {
+    let raw_pass = "user_input_password";
+    
+    // Async Argon2/Bcrypt generation
+    let hashed = crypto.hash_data(raw_pass).await.unwrap();
+    
+    // Async Verification
+    let is_valid = crypto.verify_hash(raw_pass, &hashed.hash).await.unwrap_or(false);
+    
+    // Symmetric AES-256 Encryption for sensitive fields
+    let encrypted = crypto.encrypt_text("SSN-123-456").unwrap();
+    let decrypted = crypto.decrypt_text(&encrypted.encrypted_text).unwrap();
+    
+    http_ok("Crypto routines validated.")
 }
 
 ```
-### 7.3 Link Lifetime Token Expirations
+### 5.3 OTP & Magic Links
 ```rust
-let link_token = linkv_service.generate_token("user_12", 300)
-    .map_err(|_| actix_web::error::ErrorInternalServerError("Link payload generation failed"))?;
+// OTP Generation (Stored in Redis, valid for 300s)
+let otp = otp_service.generate_otp("user_12", 6, 300).await; 
+let is_valid = otp_service.verify_otp("user_12", &otp).await.unwrap_or(false);
 
-if linkv_service.verify_token(&link_token).unwrap_or(false) {
-    println!("Action URL execution approved.");
-}
+// Link Verification (JWT-based magic links)
+let magic_link_token = linkv_service.generate_token("user_12", 300).unwrap();
+let is_link_valid = linkv_service.verify_token(&magic_link_token).unwrap_or(false);
 
 ```
-### 7.4 Safe Email Senders
+## 6. External Integrations
+### 6.1 Email Dispatch (EmailService)
+A robust SMTP wrapper configured via the AppState.
 ```rust
-#[get("/test/email")]
-async fn test_email(email_service: web::Data<EmailService>) -> Rsp {
+async fn dispatch_alert(email_service: web::Data<EmailService>) -> HttpResponse {
     let data = EmailData {
-        to: "receiver@example.com".to_string(),
-        subject: "Production System Alert".to_string(),
-        body: "Automated report log payload delivery text content.".to_string(),
+        to: "admin@company.com".to_string(),
+        subject: "CRITICAL: Database Latency".to_string(),
+        body: "Connection pool saturation detected. Please scale workers.".to_string(),
     };
     
     match email_service.send_email(&data).await {
-        Ok(_) => http_ok("Mail dispatch queue execution tracking success."),
-        Err(e) => http_bad(&format!("Mail deliverability system failure: {}", e)),
+        Ok(_) => http_ok("Alert dispatched successfully."),
+        Err(e) => http_server_error(&format!("SMTP Failure: {}", e)),
     }
 }
 
 ```
-## 8. Cryptography Services
-Enforces password security using asynchronous Argon2/Bcrypt implementations and symmetric transformations.
-```rust
-#[get("/test/crypto")]
-async fn test_crypto(crypto: web::Data<CryptoService>) -> Result<Rsp, actix_web::Error> {
-    // 1. Symmetric Encryption
-    let secret_payload = "Sensitive Data Entry Payload";
-    let encrypted_bundle = crypto.encrypt_text(secret_payload)
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-        
-    let decrypted_raw = crypto.decrypt_text(&encrypted_bundle.encrypted_text)
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-    
-    // 2. High-Speed Hashing (Oneway Mapping checks)
-    let checksum = crypto.sha256_hash("file_string_stream")
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-    
-    // 3. Async Secure Work-Factored Password Hashing
-    let registration_pass = "user_plain_text_password";
-    let hashed_storage_entry = crypto.hash_data(registration_pass).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
-        
-    let login_match = crypto.verify_hash(registration_pass, &hashed_storage_entry.hash).await
-        .unwrap_or(false);
-    
-    if login_match {
-        Ok(http_ok("Cryptographic validation check passed successfully."))
-    } else {
-        Ok(http_bad("Invalid credentials provided."))
-    }
-}
-
-```
-
-## 9. Error Handling
-
-Streamline error handling in your HTTP routes using the built-in `try_catch!` macro. This intercepts failures and automatically formats the error response for the client (not production ready yet).
-
-```rust
-// Easy, Better & Clean Error Handling will be coming soon!
-use actix_web::{get};
-use fr_rust::prelude::*;
-
-#[get("/hello")]
-async fn do_something() -> Rsp {
-    // Evaluates the future; if it fails, immediately returns the custom error message to the client
-    let data = try_catch!(
-        try my_async_function().await,
-        catch error => {
-            println!("Failed to process request data: {:?}", error);
-            return http_bad("Error occurred!")
-        }
-    );
-    // If Everything is fine:
-    send_str("Hello, World!")
-}
-```
-
-## Examples
-
-Here are some projects demonstrating how to use this library:
-
-* 👤 [Account Handling Routes](https://github.com/sayed-anower/fr-acc) – An advanced user account management demo featuring signup, login, and authentication flows.
-* 💬 [Chat Server Handling](https://github.com/sayed-anower/chatapp) – A full-scale, production-grade chat server featuring multi-server support powered by Redis.
+## 7. Architectural Best Practices
+To extract maximum performance from the fr-rust ecosystem, strictly adhere to the following paradigms:
+ * **String Allocation:** Always prioritize http_bad_static("...") over http_bad(&format!("...")). String allocation on the critical hot path of error handling creates unnecessary heap pressure.
+ * **Response Bodies:** Never use HttpResponse::Ok().body(data) for large files. Always utilize send_file_fast to leverage zero-copy mmap capabilities.
+ * **Compression Headers:** Rely on Brotli (http_brotli) for JSON APIs where bandwidth is the bottleneck, but switch to LZ4 (http_lz4) for internal microservices where CPU decompression speed is critical.
+ * **Status Codes:** Utilize the semantic helpers (http_no_content(), http_created()) rather than returning a 200 OK with a generic JSON status message. Accurate HTTP statuses allow edge proxies and load balancers to route correctly.
 
 ## Production Security Review Checklist
 > [!IMPORTANT]
