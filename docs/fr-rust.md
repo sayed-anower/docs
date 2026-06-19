@@ -27,7 +27,57 @@ futures-util = "0.3"
 ### Server Entry Point & Configuration
 Initialize shared state, establish safe application contexts, and protect your endpoints using the built-in token-bucket DDoS shield.
 ```rust
+use fr_rust::prelude::*;
 
+#[web_main]
+async fn main() -> Main  {
+  let app_state = AppState {
+    db_pool,
+    jwt
+  };
+  let ip = env_or_default("IP", "0.0.0.0");
+  let port = env_or_default("PORT", "8080");
+  let address = format!("{ip}:{port}");
+
+  run_server!(
+    state: app_state,
+    config: config,
+    addr: "0.0.0.0:8080",
+    app: {
+        .wrap(actix_web::middleware::Logger::default())
+        .app_data(web::PayloadConfig::new(10 * 1024 * 1024)) // 10MB
+    },
+    server: {
+        .workers(num_cpus::get() * 2)
+        .shutdown_timeout(120)
+    }
+);
+}
+
+
+
+fn config(cfg: &mut ServiceConfig) {
+    // Simple routes
+    get!("/health", health_check);
+    post!("/users", create_user);
+
+    // Route with guard / extra config
+    get!("/admin/dashboard", admin_dashboard, guard(::actix_web::guard::Header("role", "admin")));
+
+    // Simple scope
+    scope!("/api", {
+        get!("/users", get_users);
+        post!("/users", create_user);
+        get!("/users/{id}", get_user);
+        put!("/users/{id}", update_user, guard(::actix_web::guard::Not(::actix_web::guard::Header("readonly", "true"))));
+    });
+
+    // Scope with guard + middleware
+    scope!("/admin", guard(::actix_web::guard::Header("admin", "true")), {
+        get!("/stats", get_stats);
+        post!("/users", admin_create_user);
+    });
+}
 ```
 ## 2. Framework Type Aliases
 **fr-rust** provides semantic type wrappers over base actix-web engines to accelerate development flow:
