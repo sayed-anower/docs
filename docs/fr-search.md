@@ -1,4 +1,4 @@
-# fr-search Documentation
+# fr-search Contentation
 **fr-search** is a high-performance, ultra-optimized search engine and document tagging system built in Rust. By leveraging cutting-edge underlying libraries and Meta's FastText model, it delivers lightning-fast search suggestions and highly accurate automated document tagging with minimal resource overhead.
 ## 1. Quick Start & Prerequisites
 ### Ecosystem Dependencies
@@ -56,10 +56,21 @@ fn run_autocomplete() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 ```
-## 3. Intelligent Engine & ML Document Auto-Tagging
+## 3. Intelligent Engine & ML Content Auto-Tagging
 The Full-Text Search (Fts) and Tagger modules operate in tandem to create a unified data enrichment and retrieval pipeline. The classification layer abstracts Meta’s .ftz models to assign categories before indexing documents into the inverted search index.
 ### Advanced Ingestion Pipeline with Mutators
 ```rust
+
+use serde::{Serialize, Deserialize};
+
+// A helper struct to bundle the internal data before serializing it into Content.content
+#[derive(Serialize, Deserialize)]
+struct DocumentPayload {
+    pub title: String,
+    pub body: String,
+    pub tags: Vec<String>,
+    pub timestamp: i64,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -79,25 +90,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // [!] At this point, document_tags can be mirrored safely to an RDBMS
 
-    // Core Document Ingestion
-    searcher.add_doc(Document {
-        id: "1".to_string(),
-        title: "Rust Memory Management".to_string(),
-        body: body_text.to_string(),
-        tags: document_tags.clone(), 
-        timestamp: 1717800000,
-    }).await?;
+    // Helper closure to package our data into the new Content format
+    let create_content_payload = |id: &str, tags_list: Vec<String>| -> Result<Content, serde_json::Error> {
+        let payload = DocumentPayload {
+            title: "Rust Memory Management".to_string(),
+            body: body_text.to_string(),
+            tags: tags_list,
+            timestamp: 1717800000,
+        };
+        
+        Ok(Content {
+            id: id.to_string(),
+            content: serde_json::to_string(&payload)?, // Converts the struct to a JSON string
+        })
+    };
+
+    // Core Content Ingestion
+    let content_to_add = create_content_payload("1", document_tags.clone())?;
+    searcher.add_doc(content_to_add).await?;
 
     // Overwriting / Updating an existing document
-    searcher.edit_doc("1".to_string(), Document {
-        id: "1".to_string(),
-        title: "Rust Memory Management".to_string(),
-        body: body_text.to_string(),
-        tags: document_tags, 
-        timestamp: 1717800000,
-    }).await?;
+    let content_to_edit = create_content_payload("1", document_tags)?;
+    searcher.edit_doc("1".to_string(), content_to_edit).await?;
 
-    // Document Scanning and Query Matching
+    // Content Scanning and Query Matching
     let limit = 10;
     let offset = 0;
     let results = searcher.search("keyword", limit, offset)?;
